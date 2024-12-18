@@ -1,145 +1,114 @@
 #include <iostream>
 #include <string>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <unistd.h>
+#include <cstring>
 
-// For Windows, include Windows specific headers
 #ifdef _WIN32
 #include <winsock2.h>
-#include <iphlpapi.h>
+#include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
-#pragma comment(lib, "iphlpapi.lib")
-#endif
-
-// Function to detect OS
-std::string get_os_name() {
-#ifdef _WIN32
-    return "Windows";
-#elif __linux__
-    return "Linux";
-#elif __APPLE__
-    return "macOS";
 #else
-    return "Unknown OS";
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#endif
+
+void initializeSockets() {
+#ifdef _WIN32
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        std::cerr << "WSAStartup failed." << std::endl;
+        exit(EXIT_FAILURE);
+    }
 #endif
 }
 
-// Function to get local IP address for Linux/macOS
-std::string get_local_ip() {
-    struct sockaddr_in sa;
-    char buffer[128];
-    
-    // Get the local IP address using a socket (for Linux/macOS)
-    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd == -1) {
-        perror("Socket creation failed");
-        return "";
-    }
-    
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons(8080);  // Port doesn't matter, just need a valid IP
-    sa.sin_addr.s_addr = inet_addr("8.8.8.8");  // Google DNS (arbitrary external IP)
-    
-    // Try to connect to the remote address to resolve the local IP
-    if (connect(sockfd, (struct sockaddr*)&sa, sizeof(sa)) == -1) {
-        perror("Failed to connect");
-        close(sockfd);
-        return "";
-    }
-    
-    // Retrieve the local IP address used for the connection
-    socklen_t len = sizeof(sa);
-    if (getsockname(sockfd, (struct sockaddr*)&sa, &len) == -1) {
-        perror("Failed to get socket name");
-        close(sockfd);
-        return "";
-    }
-    
-    // Convert the IP to string and return it
-    inet_ntop(AF_INET, &(sa.sin_addr), buffer, sizeof(buffer));
-    close(sockfd);
-    
-    return std::string(buffer);
-}
-
-// Function to get local IP address for Windows
-std::string get_local_ip_windows() {
-    PIP_ADAPTER_INFO pAdapterInfo;
-    PIP_ADAPTER_INFO pAdapter = nullptr;
-    DWORD dwSize = sizeof(IP_ADAPTER_INFO);
-    char local_ip[16] = {0};
-    
-    pAdapterInfo = (IP_ADAPTER_INFO *)malloc(sizeof(IP_ADAPTER_INFO));
-    if (GetAdaptersInfo(pAdapterInfo, &dwSize) == NO_ERROR) {
-        pAdapter = pAdapterInfo;
-        while (pAdapter) {
-            if (pAdapter->IpAddressList.IpAddress.String[0] != '0') {
-                strcpy(local_ip, pAdapter->IpAddressList.IpAddress.String);
-                break;
-            }
-            pAdapter = pAdapter->Next;
-        }
-    }
-    
-    free(pAdapterInfo);
-    return std::string(local_ip);
+void cleanupSockets() {
+#ifdef _WIN32
+    WSACleanup();
+#endif
 }
 
 int main() {
-    // Get OS and local IP
-    std::string os_name = get_os_name();
-    std::cout << "OS detected: " << os_name << std::endl;
+    initializeSockets();
 
-    std::string local_ip;
+    int clientSocket;
 #ifdef _WIN32
-    local_ip = get_local_ip_windows();
+    clientSocket = socket(AF_INET, SOCK_STREAM, 0);
 #else
-    local_ip = get_local_ip();
+    clientSocket = socket(AF_INET, SOCK_STREAM, 0);
 #endif
-
-    if (local_ip.empty()) {
-        std::cerr << "Error: Could not determine local IP address." << std::endl;
-        return 1;
+    if (clientSocket < 0) {
+        std::cerr << "Failed to create socket." << std::endl;
+        cleanupSockets();
+        return EXIT_FAILURE;
     }
 
-    std::cout << "Local IP address: " << local_ip << std::endl;
+    std::string serverIP;
+    std::cout << "Enter server IP address: ";
+    std::cin >> serverIP;
 
-    // Set server address and port
-    std::string server_ip = "192.168.1.10"; // Replace with server's local IP
-    int port = 8080;
-    
-    // Create socket
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock == -1) {
-        perror("Socket creation failed");
-        return 1;
+    sockaddr_in serverAddr;
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(8080);
+    if (inet_pton(AF_INET, serverIP.c_str(), &serverAddr.sin_addr) <= 0) {
+        std::cerr << "Invalid address or address not supported." << std::endl;
+#ifdef _WIN32
+        closesocket(clientSocket);
+#else
+        close(clientSocket);
+#endif
+        cleanupSockets();
+        return EXIT_FAILURE;
     }
 
-    sockaddr_in server_addr;
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port);
-    server_addr.sin_addr.s_addr = inet_addr(server_ip.c_str());
-
-    // Connect to the server
-    if (connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
-        perror("Connection failed");
-        close(sock);
-        return 1;
+    if (connect(clientSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
+        std::cerr << "Connection to the server failed." << std::endl;
+#ifdef _WIN32
+        closesocket(clientSocket);
+#else
+        close(clientSocket);
+#endif
+        cleanupSockets();
+        return EXIT_FAILURE;
     }
 
-    // Send message to the server
-    std::string message = "Hello from client!";
-    if (send(sock, message.c_str(), message.length(), 0) == -1) {
-        perror("Message send failed");
-        close(sock);
-        return 1;
-    }
-    
-    std::cout << "Message sent to server: " << message << std::endl;
+    std::cout << "Connected to the server." << std::endl;
 
-    // Close socket
-    close(sock);
+    std::cin.ignore(); // Clear the input buffer after std::cin.
+    std::string message;
+    char buffer[1024];
+    while (true) {
+        std::cout << "Enter message to send (or type 'exit' to quit): ";
+        std::getline(std::cin, message);
+
+        if (message == "exit") {
+            break;
+        }
+
+        // Send the message, including the null terminator.
+        if (send(clientSocket, message.c_str(), message.size(), 0) < 0) {
+            std::cerr << "Failed to send message." << std::endl;
+            break;
+        }
+
+        // Clear and receive server response.
+        std::memset(buffer, 0, sizeof(buffer));
+        int bytesReceived = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
+        if (bytesReceived <= 0) {
+            std::cerr << "Connection closed by the server." << std::endl;
+            break;
+        }
+
+        std::cout << "Server response: " << buffer << std::endl;
+    }
+
+#ifdef _WIN32
+    closesocket(clientSocket);
+#else
+    close(clientSocket);
+#endif
+    cleanupSockets();
 
     return 0;
 }
