@@ -1,101 +1,125 @@
 #include <iostream>
+#include <thread>
+#include <vector>
 #include <string>
+#include <cstring>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
-#include <cstring>
-
-// For Windows
-#ifdef _WIN32
-#include <winsock2.h>
-#include <windows.h>
-#pragma comment(lib, "ws2_32.lib")
+#include <arpa/inet.h>
 #endif
 
-#define PORT 8080
-#define BUFFER_SIZE 1024
-
-// Function to handle Windows initialization
+void initializeSockets() {
 #ifdef _WIN32
-void init_win_socket() {
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        std::cerr << "WSAStartup failed!" << std::endl;
-        exit(1);
+        std::cerr << "WSAStartup failed." << std::endl;
+        exit(EXIT_FAILURE);
+    }
+#endif
+}
+
+void cleanupSockets() {
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
+void handleClient(int clientSocket) {
+    char buffer[1024];
+    while (true) {
+        std::memset(buffer, 0, sizeof(buffer));
+        int bytesReceived = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
+        if (bytesReceived <= 0) {
+            std::cout << "Client disconnected." << std::endl;
+#ifdef _WIN32
+            closesocket(clientSocket);
+#else
+            close(clientSocket);
+#endif
+            return;
+        }
+
+        std::cout << "Received: " << buffer << std::endl;
+        std::string response = "Echo: " + std::string(buffer);
+        send(clientSocket, response.c_str(), response.size(), 0);
     }
 }
-#endif
 
 int main() {
+    initializeSockets();
+
+    int serverSocket;
 #ifdef _WIN32
-    init_win_socket(); // Initialize Windows socket library
+    serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+#else
+    serverSocket = socket(AF_INET, SOCK_STREAM, 0);
 #endif
-
-    // Create server socket
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd == -1) {
-        perror("Socket creation failed");
-        return 1;
+    if (serverSocket < 0) {
+        std::cerr << "Failed to create socket." << std::endl;
+        cleanupSockets();
+        return EXIT_FAILURE;
     }
 
-    sockaddr_in server_addr;
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(PORT);
-    server_addr.sin_addr.s_addr = INADDR_ANY; // Accept connections from any IP
+    sockaddr_in serverAddr;
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
+    serverAddr.sin_port = htons(8080);
 
-    // Bind the socket to the address and port
-    if (bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        perror("Bind failed");
-        close(server_fd);
-        return 1;
+    if (bind(serverSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
+        std::cerr << "Bind failed." << std::endl;
+#ifdef _WIN32
+        closesocket(serverSocket);
+#else
+        close(serverSocket);
+#endif
+        cleanupSockets();
+        return EXIT_FAILURE;
     }
 
-    // Listen for incoming connections
-    if (listen(server_fd, 5) < 0) {
-        perror("Listen failed");
-        close(server_fd);
-        return 1;
+    if (listen(serverSocket, 5) < 0) {
+        std::cerr << "Listen failed." << std::endl;
+#ifdef _WIN32
+        closesocket(serverSocket);
+#else
+        close(serverSocket);
+#endif
+        cleanupSockets();
+        return EXIT_FAILURE;
     }
 
-    std::cout << "Server listening on port " << PORT << "..." << std::endl;
+    std::cout << "Server listening on port 8080..." << std::endl;
 
-    // Accept an incoming connection
-    int client_socket;
-    sockaddr_in client_addr;
-    socklen_t client_addr_len = sizeof(client_addr);
+    std::vector<std::thread> clientThreads;
 
-    client_socket = accept(server_fd, (struct sockaddr*)&client_addr, &client_addr_len);
-    if (client_socket < 0) {
-        perror("Accept failed");
-        close(server_fd);
-        return 1;
+    while (true) {
+        sockaddr_in clientAddr;
+        socklen_t clientLen = sizeof(clientAddr);
+        int clientSocket = accept(serverSocket, (struct sockaddr*)&clientAddr, &clientLen);
+        if (clientSocket < 0) {
+            std::cerr << "Failed to accept client connection." << std::endl;
+            continue;
+        }
+
+        std::cout << "Client connected: " << inet_ntoa(clientAddr.sin_addr) << ":" << ntohs(clientAddr.sin_port) << std::endl;
+
+        clientThreads.emplace_back([clientSocket]() { handleClient(clientSocket); });
+        clientThreads.back().detach();
     }
 
-    std::cout << "Connection established with client." << std::endl;
-
-    // Receive a message from the client
-    char buffer[BUFFER_SIZE] = {0};
-    int read_size = read(client_socket, buffer, BUFFER_SIZE);
-    if (read_size < 0) {
-        perror("Read failed");
-        close(client_socket);
-        close(server_fd);
-        return 1;
-    }
-
-    std::cout << "Message from client: " << buffer << std::endl;
-
-    // Optionally, send a response to the client
-    std::string response = "Hello from server!";
-    send(client_socket, response.c_str(), response.length(), 0);
-
-    // Close the sockets
-    close(client_socket);
-    close(server_fd);
 
 #ifdef _WIN32
-    WSACleanup(); // Clean up Windows socket library
+    closesocket(serverSocket);
+#else
+    close(serverSocket);
 #endif
+    cleanupSockets();
 
     return 0;
 }
